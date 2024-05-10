@@ -17,6 +17,7 @@ class State(Enum):
     AWAITING_DM_PERMISSION_REQUEST = auto()
     AWAITING_BLOCK_USER_REQUEST = auto()
     REPORT_COMPLETE = auto()
+    CANCELED = auto()
 
 
 class BroadAbuseType(str, Enum):
@@ -59,24 +60,23 @@ class SpecificAbuseType(str, Enum):
 
 
 severities = {
-    "Scam": 3,
-    "Bot Messages": 2,
-    "Soliciting": 2,
-    "Impersonation": 3,
-    "Misinformation": 2,
-    "Sexual content": 3,
-    "Violence": 4,
-    "Hate Speech": 2,
-    "Self harm / suicide": 4,
-    "Credible threat of violence": 5,
-    "Terrorist propaganda": 5,
-    "Doxxing": 4,
-    "Bullying": 3,
-    "Sexually-related harassment": 4,
-    "Hate Speech": 2,
-    "Unsolicited continuous contact": 3,
-    "Grooming": 5
-},
+    SpecificAbuseType.SCAM: 3,
+    SpecificAbuseType.BOTMESSAGES: 2,
+    SpecificAbuseType.SOLICITATION: 2,
+    SpecificAbuseType.IMPERSONATION: 3,
+    SpecificAbuseType.MISINFORMATION: 2,
+    SpecificAbuseType.SEXUAL_CONTENT: 3,
+    SpecificAbuseType.VIOLENCE: 4,
+    SpecificAbuseType.HATE_SPEECH: 2,
+    SpecificAbuseType.SELF_HARM: 4,
+    SpecificAbuseType.TERRORIST_PROPAGANDA: 5,
+    SpecificAbuseType.DOXXING: 4,
+    SpecificAbuseType.BULLYING: 3,
+    SpecificAbuseType.SEXUAL: 4,
+    SpecificAbuseType.CONTINUOUS_CONTACT: 3,
+    SpecificAbuseType.GROOMING: 5,
+    BroadAbuseType.OTHER: 1,
+}
 
 
 class Report:
@@ -84,8 +84,11 @@ class Report:
     CANCEL_KEYWORD = "cancel"
     HELP_KEYWORD = "help"
 
-    def __init__(self, client):
+    def __init__(self, client, author):
         self.state = State.REPORT_START
+        self.author = author
+        self.guild_id = None
+        self.reported_message = None
         self.client = client
         self.message = None
         self.abuse_type = None
@@ -100,7 +103,7 @@ class Report:
         '''
 
         if message.content == self.CANCEL_KEYWORD:
-            self.state = State.REPORT_COMPLETE
+            self.state = State.CANCELED
             return ["Report cancelled."]
 
         if self.state == State.REPORT_START:
@@ -119,6 +122,7 @@ class Report:
             guild = self.client.get_guild(int(m.group(1)))
             if not guild:
                 return ["I cannot accept reports of messages from guilds that I'm not in. Please have the guild owner add me to the guild and try again."]
+            self.guild_id = guild.id
             channel = guild.get_channel(int(m.group(2)))
             if not channel:
                 return ["It seems this channel was deleted or never existed. Please try again or say `cancel` to cancel."]
@@ -129,17 +133,30 @@ class Report:
 
             # Here we've found the message - it's up to you to decide what to do next!
             self.state = State.AWAITING_ABUSE_TYPE
+            self.reported_message = message
             return [{"text": "I found this message:"},
                     {"text": "```" + message.author.name +
                         ": " + message.content + "```"},
                     {"text": "Please select the reason for reporting this message.", "view": self.generate_abuse_type_menu()}]
 
-        # If grooming has been selected, we need to collect more information
-        if self.specific_abuse_type == SpecificAbuseType.GROOMING and self.state == State.IMMINENT_DANGER:
-            self.state = State.AWAITING_DM_PERMISSION_REQUEST
-            response = "Thank you for bringing this to our attention. \n"
-            response += "Grooming is a serious issue and we need to collect more information to address it. \n"
-            response += "Do you give us permission to review your message history with this person? (Yes/No)"
+        # Once the user has selected abuse type and specific abuse type, and more information has been collected
+        if self.state == State.IMMINENT_DANGER:
+            self.state = State.REMOVE_CONTENT
+            response = "Thank you for bringing this to our attention.\n\n"
+            if 'y' in message.content.lower():
+                self.report_severity_multiplier = 2
+                response += "*Please remember that if you feel that you are in danger, you should immediately contact your local authorities.* \n\n"
+
+            # If grooming has been selected, we need to collect more information
+            if self.specific_abuse_type == SpecificAbuseType.GROOMING:
+                self.state = State.AWAITING_DM_PERMISSION_REQUEST
+                response += "*Grooming is a serious issue and we need to collect more information to address it.* \n\n"
+                response += "Do you give us permission to review your message history with this person? (Yes/No)"
+                return [response]
+
+            response += "Our team will review the reported content and take appropriate action against the content or account of the violator.\n\n"
+            response += "Would you like us to remove the content from your feed? (Yes/No)"
+
             return [response]
 
         # Need to know if the user gives permission to the bot to review their message history
@@ -156,7 +173,7 @@ class Report:
 
             return [response]
 
-        # Need to know if the user wants to block the user who they reported
+         # Need to know if the user wants to block the user who they reported
         if self.state == State.AWAITING_BLOCK_USER_REQUEST:
             response = ""
             self.state = State.REPORT_COMPLETE
@@ -170,17 +187,6 @@ class Report:
             response += "Thank you for contributing to the safety and quality of our platform!"
             return [response]
 
-        # Once the user has selected abuse type and specific abuse type, and more information has been collected
-        if self.state == State.IMMINENT_DANGER:
-            self.state = State.REMOVE_CONTENT
-            response = "Thank you for bringing this to our attention.\n"
-            response += "Our team will review the reported content and take appropriate action against the content or account of the violator.\n"
-            response += "Would you like us to remove the content from your feed? (Yes/No)"
-            if 'y' in message.content.lower():
-                self.report_severity_multiplier = 2
-                # TODO: add in imminent danger message as needed.
-            return [response]
-
         # We need to see if the user wants the content removed from their feed.
         if self.state == State.REMOVE_CONTENT:
             # TODO: Change this to something else so that report is not compelte until moderator reviews it?
@@ -191,13 +197,10 @@ class Report:
             response += "Thank you for contributing to the safety and quality of our platform!"
             return [response]
 
-        #call compile message
+        # call compile message
         self.compile_report_to_moderate()
 
         return []
-
-    def report_complete(self):
-        return self.state == State.REPORT_COMPLETE
 
     def generate_abuse_type_menu(self):
         async def callback(interaction):
@@ -439,12 +442,20 @@ class Report:
     def calculate_report_severity(self):
         return severities[self.specific_abuse_type] * self.report_severity_multiplier
 
-    # TODO: Implement this method
     def compile_report_to_moderate(self):
-        #add the info we want to self.state 
-        return [{"text": "I found this message:"},
-                    ]
+        compiled = f"The following message was reported: \n\n"
+        compiled += f"```{self.reported_message.author.name}: {self.reported_message.content}```\n"
+        compiled += f"Abuse type: {self.abuse_type}\n"
+        compiled += f"Specific Abuse Type: {self.specific_abuse_type}\n"
+        compiled += f"Severity: {self.calculate_report_severity()}\n\n\n"
+        # TODO: Include whether or not this person indiciated that they are in immediate danger
+        return compiled
 
+    def report_complete(self):
+        return self.state == State.REPORT_COMPLETE
 
-        return
+    def report_canceled(self):
+        return self.state == State.CANCELED
 
+    def get_guild_id(self):
+        return self.guild_id
