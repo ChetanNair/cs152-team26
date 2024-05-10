@@ -90,7 +90,6 @@ class Report:
         self.guild_id = None
         self.reported_message = None
         self.client = client
-        self.message = None
         self.abuse_type = None
         self.specific_abuse_type = None
         self.report_severity_multiplier = 1

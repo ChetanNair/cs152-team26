@@ -39,7 +39,6 @@ class ModBot(discord.Client):
         self.reports = {}  # Map from user IDs to the state of their report
 
         self.pending_moderation = PriorityQueue()
-        self.pqueue = {}
         self.moderations = {}
 
         # Maps from user ID to the number of offenses they have committed
@@ -100,8 +99,10 @@ class ModBot(discord.Client):
             # TODO: CHeck if this is how you get the author's name
             self.reports[author_id] = Report(self, message.author)
 
+        report = self.reports[author_id]
+
         # Let the report class handle this message; forward all the messages it returns to uss
-        responses = await self.reports[author_id].handle_message(message)
+        responses = await report.handle_message(message)
         for r in responses:
             if isinstance(r, str):
                 await message.channel.send(r)
@@ -111,17 +112,21 @@ class ModBot(discord.Client):
                 await message.channel.send(r.get("text"))
 
         # If the report is complete or cancelled, remove it from our map
-        if self.reports[author_id].report_complete():
+        if report.report_complete():
 
             # If it wasn't canceled then the report need to be moderated
-            if not self.reports[author_id].report_canceled():
-                # TODO: Add to priority queue.
-                
-                self.pending_moderation.put((self.reports[author_id].calculate_report_severity() * - 1, self.reports[author_id]))
-                
-                print(self.reports[author_id].calculate_report_severity() * - 1)
-                
-                await self.mod_channels[self.reports[author_id].get_guild_id()].send(f"There's a new report from {message.author.name} that requires attention!\n")
+            if not report.report_canceled():
+
+                self.pending_moderation.put(
+                    (report.calculate_report_severity() * - 1, report))
+
+                message = f"There's a new report from {message.author.name}!\n"
+                message += f"There are now {self.pending_moderation.qsize()} report(s) in the queue.\n\n\n"
+
+                await self.mod_channels[report.get_guild_id()].send(message)
+
+                self.num_offenses[report.reported_message.author.id] += 1
+
             self.reports.pop(author_id)
 
     async def handle_channel_message(self, message):
@@ -153,11 +158,10 @@ class ModBot(discord.Client):
                     await message.channel.send(r.get("text"))
 
             if self.moderations[author_id].moderate_complete():
+                await message.channel.send(f"There are {self.pending_moderation.qsize()} report(s) remaining.")
                 self.moderations.pop(author_id)
-            
-            return
-        
 
+            return
 
         # Only handle messages sent in the "group-#" channel
         if not message.channel.name == f'group-{self.group_num}':
