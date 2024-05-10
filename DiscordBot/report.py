@@ -91,6 +91,7 @@ class Report:
         self.abuse_type = None
         self.specific_abuse_type = None
         self.report_severity_multiplier = 1
+        self.compiled = None
 
     async def handle_message(self, message):
         '''
@@ -189,10 +190,10 @@ class Report:
             if 'y' in message.content.lower():
                 response += "The content has been removed from your feed. \n\n"
             response += "Thank you for contributing to the safety and quality of our platform!"
-            return [response]
 
-        #call compile message
-        self.compile_report_to_moderate()
+            #call compile message
+            self.compile_report_to_moderate()
+            return [response]
 
         return []
 
@@ -442,9 +443,12 @@ class Report:
     # TODO: Implement this method
     def compile_report_to_moderate(self):
         #add the info we want to self.state 
-        return [{"text": "I found this message:"},
-                    ]
-
+        self.compiled = [{"text": "This message was reported:"},
+                    {"text": "```" + self.message.author.name +
+                        ": " + self.message.content + "```"},
+                    {"text": "Abuse type " + self.abuse_type},
+                    {"text": "Specific Abuse Type " + self.specific_abuse_type},
+                    {"text": "Severity score " + self.report_severity_multiplier}]
 
         return
 

@@ -60,12 +60,14 @@ class ModBot(discord.Client):
         This function is called whenever a message is sent in a channel that the bot can see (including DMs). 
         Currently the bot is configured to only handle messages that are sent over DMs or in your group's "group-#" channel. 
         '''
+        
         # Ignore messages from the bot 
+        
         if message.author.id == self.user.id:
             return
-
         # Check if this message was sent in a server ("guild") or if it's a DM
         if message.guild:
+            #assumes that every message sent to the mod channel is a response to a prompt
             await self.handle_channel_message(message)
         else:
             await self.handle_dm(message)
@@ -89,9 +91,10 @@ class ModBot(discord.Client):
         if author_id not in self.reports:
             self.reports[author_id] = Report(self)
 
-        # Let the report class handle this message; forward all the messages it returns to uss
+        # Let the report class handle this message; forward all the messages it returns to us
         responses = await self.reports[author_id].handle_message(message)
         for r in responses:
+            last = r
             if isinstance(r, str):
                 await message.channel.send(r)
             elif r.get("view", None):
@@ -99,21 +102,56 @@ class ModBot(discord.Client):
             else:
                 await message.channel.send(r.get("text"))
 
+        # Send report to mod channel before it gets pops
+        mod_channel = self.mod_channels[message.guild.id]
+        await mod_channel.send(self.reports[author_id].compiled.get("text"))
 
         # If the report is complete or cancelled, remove it from our map
         if self.reports[author_id].report_complete():
             self.reports.pop(author_id)
 
-    async def handle_channel_message(self, message):
-        # Only handle messages sent in the "group-#" channel
-        if not message.channel.name == f'group-{self.group_num}':
-            return
+       
 
-        # Forward the message to the mod channel
+    async def handle_channel_message(self, message):
+        # Only handle messages sent in the "group-#-mod" channel these are the finished reports and responses
+        if not message.channel.name == f'group-{self.group_num}-mod':
+            return
+        
+        #Assumes that every moderator channel response is an answer to a prompt
+        
+
+
+        '''# Forward the message to the mod channel
         mod_channel = self.mod_channels[message.guild.id]
         await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
         scores = self.eval_text(message.content)
-        await mod_channel.send(self.code_format(scores))
+        await mod_channel.send(self.code_format(scores))'''
+
+    def moderator_flow(self):
+        async def callback(interaction):
+            response += "This is the start of the moderator flow, please review the report message. Is this Grooming? (Yes/No)"
+            await interaction.response.send_message(response)
+
+            user_response = await self.bot.wait_for('message')
+            if user_response.content.lower() == 'yes':
+                await interaction.followup.send("Is there imminent danger? (Yes/No)")
+                user_response = await self.bot.wait_for('message')
+                if user_response.content.lower() == 'yes':
+                    await interaction.followup.send("The Authorities must be notified now.")
+                else:
+                    await interaction.followup.send("Do the violations cross a threshold? (Yes/No)")
+                    user_response = await self.bot.wait_for('message')
+                    if user_response.content.lower() == 'yes':
+                        await interaction.followup.send("Should the User be banned (Yes/No).")
+                        user_response = await self.bot.wait_for('message')
+                        if user_response.content.lower() == 'yes':
+                            await interaction.followup.send("Please explain why: ")
+                            user_response = await self.bot.wait_for('message')
+                        else:
+                            await interaction.followup.send("Should further action be taken? (Yes/No)")
+                            user_response = await self.bot.wait_for('message')
+                            if user_response.content.lower() == 'yes':
+                                await interaction.followup.send("This will be escalated to another team")
 
     
     def eval_text(self, message):
