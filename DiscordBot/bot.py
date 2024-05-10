@@ -120,10 +120,11 @@ class ModBot(discord.Client):
                 self.pending_moderation.put(
                     (report.calculate_report_severity() * - 1, report))
 
-                message = f"There's a new report from {message.author.name}!\n"
-                message += f"There are now {self.pending_moderation.qsize()} report(s) in the queue.\n\n\n"
+                response = f"There's a new report from {message.author.name}!\n"
+                response += f"There are {self.pending_moderation.qsize()} report(s) in the queue.\n\n"
+                response += "Type \"show reports\" to see them or \"moderate\" to start moderating. \n\n\n"
 
-                await self.mod_channels[report.get_guild_id()].send(message)
+                await self.mod_channels[report.get_guild_id()].send(response)
 
                 self.num_offenses[report.reported_message.author.id] += 1
 
@@ -137,12 +138,21 @@ class ModBot(discord.Client):
             if self.pending_moderation.empty() and author_id not in self.moderations:
                 await message.channel.send("No reports to moderate! Rest easy :)")
                 return
+            
+            if message.content == ModerateReport.SHOW_REPORTS_KEYWORD:
+                for index, tup in enumerate(list(self.pending_moderation.queue)):
+                    _, report = tup
+                    await message.channel.send(f"{index + 1}. {report.compile_summary()}")
+                response = f"There are {self.pending_moderation.qsize()} report(s) in the queue.\n\n"
+                response += "Type \"show reports\" to see them or \"moderate\" to start moderating. \n\n\n"
+                await message.channel.send(response)
+                return
 
             if author_id not in self.moderations and not message.content.startswith(ModerateReport.START_KEYWORD):
                 return
 
             if author_id not in self.moderations:
-                # Pop a report from the queue
+                # Pop a report from the queue in order of severity
                 report = self.pending_moderation.get()[1]
 
                 # Assign the moderator
