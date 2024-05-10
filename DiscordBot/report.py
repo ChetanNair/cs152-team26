@@ -17,6 +17,7 @@ class State(Enum):
     AWAITING_DM_PERMISSION_REQUEST = auto()
     AWAITING_BLOCK_USER_REQUEST = auto()
     REPORT_COMPLETE = auto()
+    AWAITING_GROOMING_INFO = auto()
     CANCELED = auto()
 
 
@@ -53,7 +54,7 @@ class SpecificAbuseType(str, Enum):
     BULLYING = "BULLYING"
     SEXUAL = "SEXUAL"
     CONTINUOUS_CONTACT = "CONTINUOUS_CONTACT"
-    GROOMING = "GROOMING"
+    GROOMING = "CHILD_GROOMING"
 
     def __str__(self) -> str:
         return str.__str__(self)
@@ -93,6 +94,9 @@ class Report:
         self.abuse_type = None
         self.specific_abuse_type = None
         self.report_severity_multiplier = 1
+        self.child_grooming_info = []
+        self.danger_indicated = False
+        self.permission_give = False
 
     async def handle_message(self, message):
         '''
@@ -143,15 +147,16 @@ class Report:
             self.state = State.REMOVE_CONTENT
             response = "Thank you for bringing this to our attention.\n\n"
             if 'y' in message.content.lower():
-                self.report_severity_multiplier = 2
+                self.danger_indicated = True
+                self.report_severity_multiplier *= 2
                 response += "*Please remember that if you feel that you are in danger, you should immediately contact your local authorities.* \n\n"
 
             # If grooming has been selected, we need to collect more information
             if self.specific_abuse_type == SpecificAbuseType.GROOMING:
-                self.state = State.AWAITING_DM_PERMISSION_REQUEST
+                self.state = State.AWAITING_GROOMING_INFO
                 response += "*Grooming is a serious issue and we need to collect more information to address it.* \n\n"
-                response += "Do you give us permission to review your message history with this person? (Yes/No)"
-                return [response]
+
+                return [{'text': response, 'view': self.generate_interaction_history_menu()}]
 
             response += "Our team will review the reported content and take appropriate action against the content or account of the violator.\n\n"
             response += "Would you like us to remove the content from your feed? (Yes/No)"
@@ -163,13 +168,13 @@ class Report:
             self.state = State.AWAITING_BLOCK_USER_REQUEST
             response = ""
             if 'y' in message.content.lower():
-                response += "Thank you for giving us permission to review your message history. \n"
-                response += "Until the review process is complete, would you like to block this user? (Yes/No)"
-            else:
-                self.state = State.REPORT_COMPLETE
-                response += "Our content moderation team will now review the reported message and take appropriate actions which may include removal of the messager's account. \n\n"
-                response += "Thank you for contributing to the safety and quality of our platform!"
+                response += "Thank you for giving us permission to review your message history. \n\n"
+                self.permission_given = True
 
+            else:
+                response += "Our team may follow up with you to better understand the situation. \n\n"
+
+            response += "Until the review process is complete, would you like to block this user? This action is reversible. (Yes/No)\n"
             return [response]
 
          # Need to know if the user wants to block the user who they reported
@@ -261,7 +266,7 @@ class Report:
         async def callback(interaction):
             self.specific_abuse_type = select_menu.values[0]
             self.state = State.IMMINENT_DANGER
-            response = f"You reported content for {self.specific_abuse_type}. Thank you for your feedback. \n"
+            response = f"You reported content for {self.specific_abuse_type}. Thank you for your feedback. \n\n"
             response += "Is there an immediate risk to someone's safety? (Yes/No)"
             await interaction.response.send_message(response)
 
@@ -314,7 +319,7 @@ class Report:
             self.specific_abuse_type = select_menu.values[0]
 
             self.state = State.IMMINENT_DANGER
-            response = f"You reported a {self.specific_abuse_type} threat. Thank you for taking the time to report this issue. \n"
+            response = f"You reported a {self.specific_abuse_type} threat. Thank you for taking the time to report this issue. \n\n"
             response += "Is there an immediate risk to someone's safety? (Yes/No)"
             await interaction.response.send_message(response)
 
@@ -355,7 +360,7 @@ class Report:
             self.specific_abuse_type = select_menu.values[0]
 
             self.state = State.IMMINENT_DANGER
-            response = f"You reported {self.specific_abuse_type} as the type of harassment. Thank you for informing us. \n"
+            response = f"You reported {self.specific_abuse_type} as the type of harassment. Thank you for informing us. \n\n"
             response += "Do you require immediate assistance? (Yes/No)"
             await interaction.response.send_message(response)
 
@@ -379,10 +384,10 @@ class Report:
                 emoji="📱"
             ),
             SelectOption(
-                label='Grooming',
+                label='Child Grooming',
                 description="Emotional connection to lower someone's inhibitions for abuse or exploitation.",
                 value=SpecificAbuseType.GROOMING,
-                emoji="🐺"
+                emoji="🫥"
             ),
         ]
 
@@ -397,12 +402,52 @@ class Report:
         view.add_item(select_menu)
         return view
 
+    def generate_interaction_history_menu(self):
+        async def callback(interaction):
+            self.child_grooming_info = select_menu.values
+
+            self.state = State.AWAITING_DM_PERMISSION_REQUEST
+            response = "Thank you for providing this information. \n\n"
+            response += "Do you give us permission to review your message history with this person? (Yes/No)"
+            await interaction.response.send_message(response)
+
+        choices = [
+            SelectOption(
+                label='Pictures have been exchanged',
+                value='pictures_exchanged',
+                emoji="📸"
+            ),
+            SelectOption(
+                label='Met this person in real life',
+                value='met_in_real_life',
+                emoji="🤝"
+            ),
+            SelectOption(
+                label='They\'ve asked personal questions',
+                value='personal_questions_asked',
+                emoji="❓"
+            ),
+        ]
+
+        select_menu = Select(
+            min_values=0,
+            max_values=3,
+            placeholder='Which of the following have occurred?',
+            options=choices,
+            custom_id='interaction_history_menu',
+        )
+
+        select_menu.callback = callback
+        view = View()
+        view.add_item(select_menu)
+        return view
+
     def generate_explicit_content_type_menu(self):
         async def callback(interaction):
             self.specific_abuse_type = select_menu.values[0]
 
             self.state = State.IMMINENT_DANGER
-            response = f"You reported {self.specific_abuse_type}. Thank you for your feedback. \n"
+            response = f"You reported {self.specific_abuse_type}. Thank you for your feedback. \n\n"
             response += "Do you require immediate assistance? (Yes/No)"
             await interaction.response.send_message(response)
 
@@ -439,15 +484,28 @@ class Report:
         return view
 
     def calculate_report_severity(self):
-        return severities[self.specific_abuse_type] * self.report_severity_multiplier
+        return severities[self.specific_abuse_type] * self.report_severity_multiplier + len(self.child_grooming_info)
 
     def compile_report_to_moderate(self):
         compiled = f"The following message was reported: \n\n"
         compiled += f"```{self.reported_message.author.name}: {self.reported_message.content}```\n"
         compiled += f"Abuse type: {self.abuse_type}\n"
         compiled += f"Specific Abuse Type: {self.specific_abuse_type}\n"
-        compiled += f"Severity: {self.calculate_report_severity()}\n\n\n"
-        # TODO: Include whether or not this person indiciated that they are in immediate danger
+        compiled += f"Severity: {self.calculate_report_severity()}\n\n"
+        if self.child_grooming_info:
+            compiled += "The following grooming indicators were reported: \n"
+            for info in self.child_grooming_info:
+                compiled += f"- {info}\n"
+            compiled += "\n"
+        if self.danger_indicated:
+            compiled += "The reporter indicated that there is an immediate risk to someone's safety.\n"
+
+        if self.permission_given:
+            compiled += "The reporter has given permission to review their message history.\n"
+        else:
+            compiled += "The reporter has *not* given permission to review their message history.\n"
+
+        compiled += "\n\n\n"
         return compiled
 
     def report_complete(self):
@@ -458,3 +516,7 @@ class Report:
 
     def get_guild_id(self):
         return self.guild_id
+
+    def compile_summary(self):
+        response = f"{self.specific_abuse_type} reported by {self.author.name} with severity {self.calculate_report_severity()}\n"
+        return response
