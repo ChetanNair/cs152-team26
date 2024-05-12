@@ -96,7 +96,7 @@ class Report:
         self.report_severity_multiplier = 1
         self.child_grooming_info = []
         self.danger_indicated = False
-        self.permission_give = False
+        self.permission_given = False
 
     async def handle_message(self, message):
         '''
