@@ -201,9 +201,6 @@ class Report:
             response += "Thank you for contributing to the safety and quality of our platform!"
             return [response]
 
-        # call compile message
-        self.compile_report_to_moderate()
-
         return []
 
     def generate_abuse_type_menu(self):
@@ -486,7 +483,7 @@ class Report:
     def calculate_report_severity(self):
         return severities[self.specific_abuse_type] * self.report_severity_multiplier + len(self.child_grooming_info)
 
-    def compile_report_to_moderate(self):
+    def compile_report_to_moderate(self, num_offenses):
         compiled = f"The following message was reported: \n\n"
         compiled += f"```{self.reported_message.author.name}: {self.reported_message.content}```\n"
         compiled += f"Abuse type: {self.abuse_type}\n"
@@ -502,8 +499,11 @@ class Report:
 
         if self.permission_given:
             compiled += "The reporter has given permission to review their message history.\n"
-        else:
+        elif self.specific_abuse_type == SpecificAbuseType.GROOMING:
             compiled += "The reporter has *not* given permission to review their message history.\n"
+
+        if num_offenses:
+            compiled += f"{self.reported_message.author.name} has been reported {num_offenses - 1} time(s) in the past.\n"
 
         compiled += "\n\n\n"
         return compiled

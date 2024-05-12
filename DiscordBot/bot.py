@@ -158,7 +158,7 @@ class ModBot(discord.Client):
                 # Assign the moderator
                 self.moderations[author_id] = ModerateReport(self, report)
 
-            responses = await self.moderations[author_id].handle_message(message)
+            responses = await self.moderations[author_id].handle_message(message, self.num_offenses[self.moderations[author_id].report.reported_message.author.id])
             for r in responses:
                 if isinstance(r, str):
                     await message.channel.send(r)
