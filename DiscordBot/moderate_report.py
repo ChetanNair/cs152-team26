@@ -137,7 +137,7 @@ class ModerateReport:
 
         select_menu = Select(
             min_values=0,
-            max_values=3,
+            max_values=4,
             placeholder='Please select action(s) against the reported user',
             options=choices,
             custom_id='user_action_menu',
