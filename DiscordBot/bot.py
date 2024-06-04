@@ -29,7 +29,6 @@ token_path = 'tokens.json'
 if not os.path.isfile(token_path):
     raise Exception(f"{token_path} not found!")
 with open(token_path) as f:
-    # If you get an error here, it means your token is formatted incorrectly. Did you put it in quotes?
     tokens = json.load(f)
     discord_token = tokens['discord']
 
@@ -80,6 +79,15 @@ CREATE TABLE IF NOT EXISTS moderations (
 )
 ''')
 
+c.execute('''
+CREATE TABLE IF NOT EXISTS regex_rules (
+    rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    pattern TEXT,
+    FOREIGN KEY (guild_id) REFERENCES guilds (id)
+)
+''')
+
 conn.commit()
 
 class ModBot(discord.Client):
@@ -105,7 +113,6 @@ class ModBot(discord.Client):
             print(f' - {guild.name}')
         print('Press Ctrl-C to quit.')
 
-        # Parse the group number out of the bot's name
         match = re.search('[gG]roup (\d+) [bB]ot', self.user.name)
         if match:
             self.group_num = match.group(1)
@@ -113,7 +120,6 @@ class ModBot(discord.Client):
             raise Exception(
                 "Group number not found in bot's name. Name format should be \"Group # Bot\".")
 
-        # Find the mod channel in each guild that this bot should report to
         for guild in self.guilds:
             for channel in guild.text_channels:
                 if channel.name == f'group-{self.group_num}-mod':
@@ -128,14 +134,12 @@ class ModBot(discord.Client):
         if message.author.id == self.user.id:
             return
 
-        # Check if this message was sent in a server ("guild") or if it's a DM
         if message.guild:
             await self.handle_channel_message(message)
         else:
             await self.handle_dm(message)
 
     async def handle_dm(self, message):
-        # Handle a help message
         if message.content == Report.HELP_KEYWORD:
             reply = "Use the `report` command to begin the reporting process.\n"
             reply += "Use the `cancel` command to cancel the report process.\n"
@@ -151,7 +155,6 @@ class ModBot(discord.Client):
 
         # If we don't currently have an active report for this user, add one
         if author_id not in self.reports:
-            # TODO: Check if this is how you get the author's name
             self.reports[author_id] = Report(self, message.author)
 
         report = self.reports[author_id]
@@ -168,10 +171,8 @@ class ModBot(discord.Client):
 
         # If the report is complete or cancelled, remove it from our map
         if report.report_complete():
-
             # If it wasn't canceled then the report need to be moderated
             if not report.report_canceled():
-
                 self.pending_moderation.put(
                     (report.calculate_report_severity() * - 1, report))
 
@@ -190,8 +191,10 @@ class ModBot(discord.Client):
             self.reports.pop(author_id)
 
     async def handle_channel_message(self, message):
-
         if message.channel.name == f'group-{self.group_num}-mod':
+            regex_command = await self.parse_for_regex_commands(message)
+            if regex_command:
+                return
             author_id = message.author.id
 
             if self.pending_moderation.empty() and author_id not in self.moderations:
@@ -213,7 +216,6 @@ class ModBot(discord.Client):
             if author_id not in self.moderations:
                 # Pop a report from the queue in order of severity
                 report = self.pending_moderation.get()[1]
-
                 # Assign the moderator
                 self.moderations[author_id] = ModerateReport(self, report)
 
@@ -228,38 +230,60 @@ class ModBot(discord.Client):
 
             if self.moderations[author_id].moderate_complete():
                 await message.channel.send(f"There are {self.pending_moderation.qsize()} report(s) remaining.")
-                
-                # Save the moderation details to the database
                 self.save_moderation_to_db(self.moderations[author_id])
                 self.moderations.pop(author_id)
-
             return
 
-        # Only handle messages sent in the "group-#" channel
         if not message.channel.name == f'group-{self.group_num}':
             return
         
-        # Keep track of the messages using a sliding window
         if len(self.messages) == CONTEXT_WINDOW_SIZE:
             self.messages.popleft()
-        self.messages.append((message.author.id,message.content, message))
+        self.messages.append((message.author.id, message.content, message))
+
+        guild_id = message.guild.id
+        c.execute('SELECT pattern FROM regex_rules WHERE guild_id = ?', (guild_id,))
+        rules = c.fetchall()
+        for rule in rules:
+            pattern = rule[0]
+            if re.search(pattern, message.content):
+                await message.delete()
+                mod_channel = self.mod_channels[message.guild.id]
+                await mod_channel.send(f'Message from {message.author.name} deleted: "{message.content}" matched rule "{pattern}"')
+                return
 
 
-        # Forward the message to the mod channel
         mod_channel = self.mod_channels[message.guild.id]
         await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
         scores = self.eval_text(self.messages)
         await mod_channel.send(self.code_format(scores))
 
+    async def parse_for_regex_commands(self, message):
+        if message.content.startswith("add_regex "):
+            pattern = message.content[len("add_regex "):].strip()
+            c.execute('''
+            INSERT INTO regex_rules (guild_id, pattern)
+            VALUES (?, ?)
+            ''', (message.guild.id, pattern))
+            conn.commit()
+            await message.channel.send(f'Regex rule "{pattern}" added successfully.')
+            return True
+
+        elif message.content.startswith("remove_regex "):
+            pattern = message.content[len("remove_regex "):].strip()
+            c.execute('''
+            DELETE FROM regex_rules
+            WHERE guild_id = ? AND pattern = ?
+            ''', (message.guild.id, pattern))
+            conn.commit()
+            await message.channel.send(f'Regex rule "{pattern}" removed successfully.')
+            return True
+        return False
+
     def eval_text(self, messages):
-        ''''
-        TODO: Once you know how you want to evaluate messages in your channel, 
-        insert your code here! This will primarily be used in Milestone 3. 
-        '''
-        # The following executes our user reporting flow with automated detection and sends it to the mod channel
         conversation = ""
         for message in messages:
-            user_id , message = message[0], message[1]
+            user_id, message = message[0], message[1]
             conversation += f"User #{user_id}: {message}"
 
         violation = query(conversation=PROMPTS["system_message"].format(content_policy=PROMPTS["content_policy"],
@@ -271,7 +295,6 @@ class ModBot(discord.Client):
         
         # If we don't currently have an active report for this user, add one
         if BOT_AUTHOR_ID not in self.reports:
-            # TODO: Check if this is how you get the author's name
             self.reports[BOT_AUTHOR_ID] = Report(self, author)
 
         report = self.reports[BOT_AUTHOR_ID]
@@ -290,7 +313,6 @@ class ModBot(discord.Client):
         elif "HARASSMENT" in first_answer:
             broad_abuse = BroadAbuseType.HARASSMENT
 
-         
         suffix = "Please say one and only one type. You must choose a type."
         second_assistant_completion = "TYPE:("
         if "SPAM" in first_answer:
@@ -300,7 +322,7 @@ class ModBot(discord.Client):
         elif "THREAT" in first_answer:
             second_question = f"Which type of threat is it: SELF_HARM, TERRORIST_PROPAGANDA, or DOXXING? {suffix}"
         elif "HARASSMENT" in first_answer:
-            second_question = f"Which type of harrassment is it: BULLYING, SEXUAL, CONTINUOUS_CONTACT, or CHILD_GROOMING? {suffix}"
+            second_question = f"Which type of harassment is it: BULLYING, SEXUAL, CONTINUOUS_CONTACT, or CHILD_GROOMING? {suffix}"
         else:
             raise Exception("Failure to pick from options")
         
@@ -335,7 +357,7 @@ class ModBot(discord.Client):
             abuse_type = SpecificAbuseType.SEXUAL
         elif "CONTINOUS" in second_answer:
             abuse_type = SpecificAbuseType.CONTINUOUS_CONTACT
-        elif"GROOMING" in second_answer:
+        elif "GROOMING" in second_answer:
             abuse_type = SpecificAbuseType.GROOMING
         else:
             raise Exception("Failure to pick from options")
@@ -389,7 +411,6 @@ class ModBot(discord.Client):
 
         self.pending_moderation.put((report.calculate_report_severity() * - 1, report))
 
-
         response = f"There's a new report from the MOD_BOT!\n"
         response += f"There are {self.pending_moderation.qsize()} report(s) in the queue.\n\n"
         response += "Type \"show reports\" to see them or \"moderate\" to start moderating. \n\n\n"
@@ -397,15 +418,9 @@ class ModBot(discord.Client):
         return response
 
     def code_format(self, text):
-        ''''
-        TODO: Once you know how you want to show that a message has been 
-        evaluated, insert your code here for formatting the string to be 
-        shown in the mod channel. 
-        '''
         return text
 
     def save_report_to_db(self, user_id, report):
-        # Insert or ignore user details
         c.execute('''
         INSERT OR IGNORE INTO users (user_id, age, num_friends, hours_logged, new_chats_last_day, num_reports, num_violations, severity)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -416,34 +431,30 @@ class ModBot(discord.Client):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (report.reported_message.author.id, None, None, None, None, 0, 0, 0))
 
-        # Increment the num_reports for the reporting user
         c.execute('''
         UPDATE users
         SET num_reports = num_reports + 1
         WHERE user_id = ?
         ''', (user_id,))
 
-        # Increment the num_violations for the reported user
         c.execute('''
         UPDATE users
         SET num_violations = num_violations + 1
         WHERE user_id = ?
         ''', (report.reported_message.author.id,))
         
-         # Update the severity for the reported user
         c.execute('''
         UPDATE users
         SET severity = COALESCE(severity, 0) + ?
         WHERE user_id = ?
         ''', (report.calculate_report_severity(), report.reported_message.author.id))
 
-        # Insert the report details and get the report_id
         c.execute('''
         INSERT INTO reports (user_id, reported_user_id, violation_type, severity, status, immediate_danger, permission_given)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (user_id, report.reported_message.author.id, report.specific_abuse_type, report.calculate_report_severity(), "OPEN", report.danger_indicated, report.permission_given))
         
-        report_id = c.lastrowid  # Get the generated report_id
+        report_id = c.lastrowid
 
         conn.commit()
 
