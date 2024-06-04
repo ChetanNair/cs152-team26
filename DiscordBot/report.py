@@ -86,6 +86,7 @@ class Report:
     HELP_KEYWORD = "help"
 
     def __init__(self, client, author):
+        self.report_id = None
         self.state = State.REPORT_START
         self.author = author
         self.guild_id = None
@@ -509,7 +510,7 @@ class Report:
         return compiled
 
     def report_complete(self):
-        return self.state == State.REPORT_COMPLETE
+        return self.state == State.REPORT_COMPLETE or self.state == State.CANCELED
 
     def report_canceled(self):
         return self.state == State.CANCELED

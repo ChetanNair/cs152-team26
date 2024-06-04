@@ -1,4 +1,3 @@
-# bot.py
 import collections
 import discord
 from discord.ext import commands
@@ -6,10 +5,11 @@ import os
 import json
 import logging
 import re
+import sqlite3
 from types import SimpleNamespace
 from collections import deque
 from queue import PriorityQueue
-from report import Report, SpecificAbuseType, BroadAbuseType,State
+from report import Report, SpecificAbuseType, BroadAbuseType, State
 from moderate_report import ModerateReport
 from claude import query, PROMPTS
 
@@ -34,6 +34,53 @@ with open(token_path) as f:
     discord_token = tokens['discord']
 
 CONTEXT_WINDOW_SIZE = 30
+
+# Initialize SQLite database
+conn = sqlite3.connect('modbot.db')
+c = conn.cursor()
+
+# Create tables
+c.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    age INTEGER,
+    num_friends INTEGER,
+    hours_logged REAL,
+    new_chats_last_day INTEGER,
+    num_reports INTEGER DEFAULT 0,
+    num_violations INTEGER DEFAULT 0,
+    severity INTEGER DEFAULT 0
+)
+''')
+
+c.execute('''
+CREATE TABLE IF NOT EXISTS reports (
+    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    reported_user_id INTEGER,
+    violation_type TEXT,
+    severity INTEGER,
+    status TEXT,
+    immediate_danger BOOLEAN DEFAULT FALSE,
+    permission_given BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY (user_id) REFERENCES users (user_id),
+    FOREIGN KEY (reported_user_id) REFERENCES users (user_id)
+)
+''')
+
+c.execute('''
+CREATE TABLE IF NOT EXISTS moderations (
+    moderation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER,
+    moderator_id INTEGER,
+    action_taken TEXT,
+    justification TEXT,
+    severity INTEGER,
+    FOREIGN KEY (report_id) REFERENCES reports (report_id)
+)
+''')
+
+conn.commit()
 
 class ModBot(discord.Client):
     def __init__(self):
@@ -136,6 +183,10 @@ class ModBot(discord.Client):
 
                 self.num_offenses[report.reported_message.author.id] += 1
 
+                # Save the report details to the database
+                report_id = self.save_report_to_db(message.author.id, report)
+                report.report_id = report_id  # Assign the generated report_id to the report
+
             self.reports.pop(author_id)
 
     async def handle_channel_message(self, message):
@@ -177,6 +228,9 @@ class ModBot(discord.Client):
 
             if self.moderations[author_id].moderate_complete():
                 await message.channel.send(f"There are {self.pending_moderation.qsize()} report(s) remaining.")
+                
+                # Save the moderation details to the database
+                self.save_moderation_to_db(self.moderations[author_id])
                 self.moderations.pop(author_id)
 
             return
@@ -350,6 +404,64 @@ class ModBot(discord.Client):
         '''
         return text
 
+    def save_report_to_db(self, user_id, report):
+        # Insert or ignore user details
+        c.execute('''
+        INSERT OR IGNORE INTO users (user_id, age, num_friends, hours_logged, new_chats_last_day, num_reports, num_violations, severity)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, None, None, None, None, 0, 0, 0))
+
+        c.execute('''
+        INSERT OR IGNORE INTO users (user_id, age, num_friends, hours_logged, new_chats_last_day, num_reports, num_violations, severity)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (report.reported_message.author.id, None, None, None, None, 0, 0, 0))
+
+        # Increment the num_reports for the reporting user
+        c.execute('''
+        UPDATE users
+        SET num_reports = num_reports + 1
+        WHERE user_id = ?
+        ''', (user_id,))
+
+        # Increment the num_violations for the reported user
+        c.execute('''
+        UPDATE users
+        SET num_violations = num_violations + 1
+        WHERE user_id = ?
+        ''', (report.reported_message.author.id,))
+        
+         # Update the severity for the reported user
+        c.execute('''
+        UPDATE users
+        SET severity = COALESCE(severity, 0) + ?
+        WHERE user_id = ?
+        ''', (report.calculate_report_severity(), report.reported_message.author.id))
+
+        # Insert the report details and get the report_id
+        c.execute('''
+        INSERT INTO reports (user_id, reported_user_id, violation_type, severity, status, immediate_danger, permission_given)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (user_id, report.reported_message.author.id, report.specific_abuse_type, report.calculate_report_severity(), "OPEN", report.danger_indicated, report.permission_given))
+        
+        report_id = c.lastrowid  # Get the generated report_id
+
+        conn.commit()
+
+        return report_id
+
+    def save_moderation_to_db(self, moderation):
+        c.execute('''
+        INSERT INTO moderations (report_id, moderator_id, action_taken, justification, severity)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (moderation.report.report_id, moderation.moderator.id, moderation.action_taken, moderation.justification, moderation.report.calculate_report_severity()))
+
+        c.execute('''
+        UPDATE reports
+        SET status = 'CLOSED'
+        WHERE report_id = ?
+        ''', (moderation.report.report_id,))
+        
+        conn.commit()
 
 client = ModBot()
 client.run(discord_token)
