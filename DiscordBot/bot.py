@@ -425,9 +425,9 @@ class ModBot(discord.Client):
                                            assistant_completion=assistant_comp)
             child_grooming_info.append(fourth_grooming_answer)
 
-            for (answer, indicator, _) in child_grooming_info:
-                if "Y" in answer:
-                    signals.append(indicator)
+            for answer in child_grooming_info:
+                if "Y" in answer[0]:
+                    signals.append(answer[1])
 
         # Populate the fields of the report to send to the mod channel
         report.guild_id = messages[-1][2].guild.id
