@@ -21,8 +21,9 @@ class ModerateReport:
     START_KEYWORD = "moderate"
     SHOW_REPORTS_KEYWORD = "show reports"
 
-    def __init__(self, client, report):
+    def __init__(self, client, report, moderator):
         self.state = State.MODERATE_START
+        self.moderator = moderator
         self.client = client
         self.report = report
         self.selected_actions = []
@@ -91,7 +92,7 @@ class ModerateReport:
 
             if 'temporary_ban' in self.selected_actions:
                 await self.send_DM(self.report.author.id, f"You have been temporarily banned from the platform while we investigate a violation of our platform policies. \n")
-                
+
             if 'warn' in self.selected_actions:
                 await self.send_DM(self.report.author.id, f"You are being warned for violating our platform policies. More information on this will be provided soon. \n")
 

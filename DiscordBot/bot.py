@@ -12,8 +12,10 @@ from queue import PriorityQueue
 from report import Report, SpecificAbuseType, BroadAbuseType, State
 from moderate_report import ModerateReport
 from claude import query, PROMPTS
+from perspective import get_perspective_scores
 
 BOT_AUTHOR_ID = 0
+PERSPECTIVE_SCORE_THRESHOLD = 0.5
 
 # Set up logging to the console
 logger = logging.getLogger('discord')
@@ -31,6 +33,7 @@ if not os.path.isfile(token_path):
 with open(token_path) as f:
     tokens = json.load(f)
     discord_token = tokens['discord']
+    perspective_token = tokens['perspective']
 
 CONTEXT_WINDOW_SIZE = 30
 
@@ -90,6 +93,7 @@ CREATE TABLE IF NOT EXISTS regex_rules (
 
 conn.commit()
 
+
 class ModBot(discord.Client):
     def __init__(self):
         intents = discord.Intents.default()
@@ -102,7 +106,7 @@ class ModBot(discord.Client):
         self.pending_moderation = PriorityQueue()
         self.moderations = {}
         self.context_window = CONTEXT_WINDOW_SIZE
-        self.messages = deque() # List of tuples of user ids and conversations
+        self.messages = deque()  # List of tuples of user ids and conversations
 
         # Maps from user ID to the number of offenses they have committed
         self.num_offenses = collections.defaultdict(int)
@@ -200,7 +204,7 @@ class ModBot(discord.Client):
             if self.pending_moderation.empty() and author_id not in self.moderations:
                 await message.channel.send("No reports to moderate! Rest easy :)")
                 return
-            
+
             if message.content == ModerateReport.SHOW_REPORTS_KEYWORD:
                 for index, tup in enumerate(list(self.pending_moderation.queue)):
                     _, report = tup
@@ -217,7 +221,7 @@ class ModBot(discord.Client):
                 # Pop a report from the queue in order of severity
                 report = self.pending_moderation.get()[1]
                 # Assign the moderator
-                self.moderations[author_id] = ModerateReport(self, report)
+                self.moderations[author_id] = ModerateReport(self, report, message.author)
 
             responses = await self.moderations[author_id].handle_message(message, self.num_offenses[self.moderations[author_id].report.reported_message.author.id])
             for r in responses:
@@ -236,7 +240,7 @@ class ModBot(discord.Client):
 
         if not message.channel.name == f'group-{self.group_num}':
             return
-        
+
         if len(self.messages) == CONTEXT_WINDOW_SIZE:
             self.messages.popleft()
         self.messages.append((message.author.id, message.content, message))
@@ -252,10 +256,28 @@ class ModBot(discord.Client):
                 await mod_channel.send(f'Message from {message.author.name} deleted: "{message.content}" matched rule "{pattern}"')
                 return
 
-
         mod_channel = self.mod_channels[message.guild.id]
-        await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
         scores = self.eval_text(self.messages)
+
+        if scores == "NO VIOLATION":
+            perspective_scores = get_perspective_scores(message.content)
+            perspective_violation = True in [
+                ele > PERSPECTIVE_SCORE_THRESHOLD for ele in list(perspective_scores.values())]
+            if perspective_scores is not None and perspective_violation:
+                await message.delete()
+                mod_channel = self.mod_channels[message.guild.id]
+                formatted_scores = "\n".join(
+                    [f"{attribute}: {score:.2f}" for attribute, score in perspective_scores.items()])
+                await mod_channel.send(
+                    f'Message from:\n'
+                    f'{message.author.name}: "{message.content}"\n\n'
+                    f'Perspective scores:\n'
+                    f'{formatted_scores}\n\n'
+                    f'This message has been deleted and the user should be reviewed.'
+                )
+                return
+            return
+
         await mod_channel.send(self.code_format(scores))
 
     async def parse_for_regex_commands(self, message):
@@ -292,18 +314,18 @@ class ModBot(discord.Client):
             return "NO VIOLATION"
 
         author = SimpleNamespace(**{"name": "MOD_BOT", "id": BOT_AUTHOR_ID})
-        
+
         # If we don't currently have an active report for this user, add one
         if BOT_AUTHOR_ID not in self.reports:
             self.reports[BOT_AUTHOR_ID] = Report(self, author)
 
         report = self.reports[BOT_AUTHOR_ID]
-        
+
         first_question = "Which of these violations does this conversation violate: SPAM, EXPLICIT_CONTENT, THREAT, or HARASSMENT? Please say one and only one violation, and nothing more."
         first_assistant_completion = "VIOLATION TYPE:"
         first_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=first_question),
                              assistant_completion=first_assistant_completion)
-        
+
         if "SPAM" in first_answer:
             broad_abuse = BroadAbuseType.SPAM
         elif "EXPLICIT_CONTENT" in first_answer:
@@ -325,10 +347,10 @@ class ModBot(discord.Client):
             second_question = f"Which type of harassment is it: BULLYING, SEXUAL, CONTINUOUS_CONTACT, or CHILD_GROOMING? {suffix}"
         else:
             raise Exception("Failure to pick from options")
-        
-        second_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=second_question), 
-                             assistant_completion=second_assistant_completion)
-    
+
+        second_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=second_question),
+                              assistant_completion=second_assistant_completion)
+
         if "SCAM" in second_answer:
             abuse_type = SpecificAbuseType.SCAM
         elif "BOT" in second_answer:
@@ -361,9 +383,10 @@ class ModBot(discord.Client):
             abuse_type = SpecificAbuseType.GROOMING
         else:
             raise Exception("Failure to pick from options")
-        
+
         third_question = f"Based on the conversation, is there an immediate and direct danger to someone's safety? Please just answer either YES or NO."
-        third_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=third_question))
+        third_answer = query(conversation=PROMPTS["gen_system_message"].format(
+            conversation=conversation, question=third_question))
 
         signals = []
         if abuse_type == SpecificAbuseType.GROOMING:
@@ -374,17 +397,20 @@ class ModBot(discord.Client):
             first_grooming_question = f"Considering the conversation, have pictures been exchanged in the conversation? {suffix}"
             first_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=first_grooming_question),
                                           assistant_completion=assistant_comp)
-            child_grooming_info.append((first_grooming_answer, "pictures_exchanged"))
+            child_grooming_info.append(
+                (first_grooming_answer, "pictures_exchanged"))
 
             second_grooming_question = f"Considering the conversation, have the people in the conversation met in real life? {suffix}"
             second_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=second_grooming_question),
                                            assistant_completion=assistant_comp)
-            child_grooming_info.append((second_grooming_answer, "met_in_real_life"))
+            child_grooming_info.append(
+                (second_grooming_answer, "met_in_real_life"))
 
             third_grooming_question = f"Considering the conversation, has one user asked another user personal questions? {suffix}"
             third_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=third_grooming_question),
                                           assistant_completion=assistant_comp)
-            child_grooming_info.append((third_grooming_answer, "personal_questions_asked"))
+            child_grooming_info.append(
+                (third_grooming_answer, "personal_questions_asked"))
 
             fourth_grooming_question = f"Is the conversation severe enough to the point where one user should be notified that they are being groomed? {suffix}"
             fourth_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=fourth_grooming_question),
@@ -401,7 +427,7 @@ class ModBot(discord.Client):
         report.reported_message = self.messages[-1][2]
         report.abuse_type = broad_abuse
         report.specific_abuse_type = abuse_type
-        
+
         report.child_grooming_info = signals
         report.danger_indicated = "Y" in third_answer
 
@@ -409,7 +435,8 @@ class ModBot(discord.Client):
         report.specific_abuse_type = abuse_type
         report.state = State.REPORT_COMPLETE
 
-        self.pending_moderation.put((report.calculate_report_severity() * - 1, report))
+        self.pending_moderation.put(
+            (report.calculate_report_severity() * - 1, report))
 
         response = f"There's a new report from the MOD_BOT!\n"
         response += f"There are {self.pending_moderation.qsize()} report(s) in the queue.\n\n"
@@ -442,7 +469,7 @@ class ModBot(discord.Client):
         SET num_violations = num_violations + 1
         WHERE user_id = ?
         ''', (report.reported_message.author.id,))
-        
+
         c.execute('''
         UPDATE users
         SET severity = COALESCE(severity, 0) + ?
@@ -453,7 +480,7 @@ class ModBot(discord.Client):
         INSERT INTO reports (user_id, reported_user_id, violation_type, severity, status, immediate_danger, permission_given)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (user_id, report.reported_message.author.id, report.specific_abuse_type, report.calculate_report_severity(), "OPEN", report.danger_indicated, report.permission_given))
-        
+
         report_id = c.lastrowid
 
         conn.commit()
@@ -464,15 +491,16 @@ class ModBot(discord.Client):
         c.execute('''
         INSERT INTO moderations (report_id, moderator_id, action_taken, justification, severity)
         VALUES (?, ?, ?, ?, ?)
-        ''', (moderation.report.report_id, moderation.moderator.id, moderation.action_taken, moderation.justification, moderation.report.calculate_report_severity()))
+        ''', (moderation.report.report_id, moderation.moderator.id, ' '.join(moderation.selected_actions), moderation.moderation_reasons, moderation.report.calculate_report_severity()))
 
         c.execute('''
         UPDATE reports
         SET status = 'CLOSED'
         WHERE report_id = ?
         ''', (moderation.report.report_id,))
-        
+
         conn.commit()
+
 
 client = ModBot()
 client.run(discord_token)
