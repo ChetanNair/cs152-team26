@@ -33,7 +33,64 @@ if not os.path.isfile(token_path):
 with open(token_path) as f:
     tokens = json.load(f)
     discord_token = tokens['discord']
+    perspective_token = tokens['perspective']
+CONTEXT_WINDOW_SIZE = 30
 
+# Initialize SQLite database
+conn = sqlite3.connect('modbot.db')
+c = conn.cursor()
+
+# Create tables
+c.execute('''
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    age INTEGER,
+    num_friends INTEGER,
+    hours_logged REAL,
+    new_chats_last_day INTEGER,
+    num_reports INTEGER DEFAULT 0,
+    num_violations INTEGER DEFAULT 0,
+    severity INTEGER DEFAULT 0
+)
+''')
+
+c.execute('''
+CREATE TABLE IF NOT EXISTS reports (
+    report_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    reported_user_id INTEGER,
+    violation_type TEXT,
+    severity INTEGER,
+    status TEXT,
+    immediate_danger BOOLEAN DEFAULT FALSE,
+    permission_given BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY (user_id) REFERENCES users (user_id),
+    FOREIGN KEY (reported_user_id) REFERENCES users (user_id)
+)
+''')
+
+c.execute('''
+CREATE TABLE IF NOT EXISTS moderations (
+    moderation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    report_id INTEGER,
+    moderator_id INTEGER,
+    action_taken TEXT,
+    justification TEXT,
+    severity INTEGER,
+    FOREIGN KEY (report_id) REFERENCES reports (report_id)
+)
+''')
+
+c.execute('''
+CREATE TABLE IF NOT EXISTS regex_rules (
+    rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    pattern TEXT,
+    FOREIGN KEY (guild_id) REFERENCES guilds (id)
+)
+''')
+
+conn.commit()
 
 class ModBot(discord.Client):
     def __init__(self):
@@ -48,8 +105,6 @@ class ModBot(discord.Client):
         self.moderations = {}
         self.context_window = CONTEXT_WINDOW_SIZE
         self.messages = deque()  # List of tuples of user ids and conversations
-        self.context_window = CONTEXT_WINDOW_SIZE
-        self.messages = deque() # List of tuples of user ids and conversations
 
         # Maps from user ID to the number of offenses they have committed
         self.num_offenses = collections.defaultdict(int)
@@ -222,8 +277,6 @@ class ModBot(discord.Client):
             return
 
         await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
-        scores = self.eval_text(self.messages)
-        await mod_channel.send(self.code_format(scores))
 
     async def parse_for_regex_commands(self, message):
         if message.content.startswith("add_regex "):
@@ -248,29 +301,41 @@ class ModBot(discord.Client):
         return False
 
     def eval_text(self, messages):
+        ''''
+        TODO: Once you know how you want to evaluate messages in your channel, 
+        insert your code here! This will primarily be used in Milestone 3. 
+        '''
+        # The following executes our user reporting flow with automated detection and sends it to the mod channel
         conversation = ""
         for message in messages:
-            user_id, message = message[0], message[1]
+            user_id , message = message[0], message[1]
             conversation += f"User #{user_id}: {message}"
 
         violation = query(conversation=PROMPTS["system_message"].format(content_policy=PROMPTS["content_policy"],
                                                                         instructions=PROMPTS["instructions"].format(conversation=conversation)), assistant_completion="")
         if "NO_VIOLATION" in violation:
+            print("NO VIOLATION")
             return "NO VIOLATION"
 
         author = SimpleNamespace(**{"name": "MOD_BOT", "id": BOT_AUTHOR_ID})
-
+        
         # If we don't currently have an active report for this user, add one
         if BOT_AUTHOR_ID not in self.reports:
+            # TODO: Check if this is how you get the author's name
             self.reports[BOT_AUTHOR_ID] = Report(self, author)
 
         report = self.reports[BOT_AUTHOR_ID]
-
+        
         first_question = "Which of these violations does this conversation violate: SPAM, EXPLICIT_CONTENT, THREAT, or HARASSMENT? Please say one and only one violation, and nothing more."
         first_assistant_completion = "VIOLATION TYPE:"
         first_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=first_question),
                              assistant_completion=first_assistant_completion)
 
+        cot_question = f"Previously, you have indicated that this violation is of type {first_answer}. Please provide a reason as to why you flagged it as such. Indicate this reason like so: Reason:"
+
+        cot_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=cot_question))
+        print(cot_answer)
+        
         if "SPAM" in first_answer:
             broad_abuse = BroadAbuseType.SPAM
         elif "EXPLICIT_CONTENT" in first_answer:
@@ -280,22 +345,24 @@ class ModBot(discord.Client):
         elif "HARASSMENT" in first_answer:
             broad_abuse = BroadAbuseType.HARASSMENT
 
+         
         suffix = "Please say one and only one type. You must choose a type."
         second_assistant_completion = "TYPE:("
         if "SPAM" in first_answer:
             second_question = f"Which type of spam is the conversation: SCAM, BOTMESSAGES, SOLICITING, IMPERSONATION, or MISINFORMATION? {suffix}"
         elif "EXPLICIT" in first_answer:
-            second_question = f"Which type of explicit content is the conversation: SEXUAL_CONTENT, VIOLENCE, or HATE_SPEECH? {suffix}"
+            second_question = f"Which type of explicit content is the conversation: SEXUAL_CONTENT, VIOLENCE, CHILD_GROOMING, or HATE_SPEECH? Please note that while CHILD_GROOMING is often SEXUAL_CONTENT, CHILD_GROOMING is a more severe instance of SEXUAL_CONTENT, so prioritize reporting CHILD_GROOMING in cases where there are both. {suffix}"
         elif "THREAT" in first_answer:
             second_question = f"Which type of threat is it: SELF_HARM, TERRORIST_PROPAGANDA, or DOXXING? {suffix}"
         elif "HARASSMENT" in first_answer:
-            second_question = f"Which type of harassment is it: BULLYING, SEXUAL, CONTINUOUS_CONTACT, or CHILD_GROOMING? {suffix}"
+            second_question = f"Which type of harrassment is it: BULLYING, SEXUAL, CONTINUOUS_CONTACT, or CHILD_GROOMING? {suffix}"
         else:
             raise Exception("Failure to pick from options")
-
-        second_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=second_question),
-                              assistant_completion=second_assistant_completion)
-
+        
+        second_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=second_question), 
+                             assistant_completion=second_assistant_completion)
+        print(second_answer)
+    
         if "SCAM" in second_answer:
             abuse_type = SpecificAbuseType.SCAM
         elif "BOT" in second_answer:
@@ -328,10 +395,9 @@ class ModBot(discord.Client):
             abuse_type = SpecificAbuseType.GROOMING
         else:
             raise Exception("Failure to pick from options")
-
+        
         third_question = f"Based on the conversation, is there an immediate and direct danger to someone's safety? Please just answer either YES or NO."
-        third_answer = query(conversation=PROMPTS["gen_system_message"].format(
-            conversation=conversation, question=third_question))
+        third_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=third_question))
 
         signals = []
         if abuse_type == SpecificAbuseType.GROOMING:
@@ -342,27 +408,24 @@ class ModBot(discord.Client):
             first_grooming_question = f"Considering the conversation, have pictures been exchanged in the conversation? {suffix}"
             first_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=first_grooming_question),
                                           assistant_completion=assistant_comp)
-            child_grooming_info.append(
-                (first_grooming_answer, "pictures_exchanged"))
+            child_grooming_info.append((first_grooming_answer, "pictures_exchanged"))
 
             second_grooming_question = f"Considering the conversation, have the people in the conversation met in real life? {suffix}"
             second_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=second_grooming_question),
                                            assistant_completion=assistant_comp)
-            child_grooming_info.append(
-                (second_grooming_answer, "met_in_real_life"))
+            child_grooming_info.append((second_grooming_answer, "met_in_real_life"))
 
             third_grooming_question = f"Considering the conversation, has one user asked another user personal questions? {suffix}"
             third_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=third_grooming_question),
                                           assistant_completion=assistant_comp)
-            child_grooming_info.append(
-                (third_grooming_answer, "personal_questions_asked"))
+            child_grooming_info.append((third_grooming_answer, "personal_questions_asked"))
 
             fourth_grooming_question = f"Is the conversation severe enough to the point where one user should be notified that they are being groomed? {suffix}"
             fourth_grooming_answer = query(conversation=PROMPTS["gen_system_message"].format(conversation=conversation, question=fourth_grooming_question),
                                            assistant_completion=assistant_comp)
             child_grooming_info.append(fourth_grooming_answer)
 
-            for (answer, indicator) in child_grooming_info:
+            for (answer, indicator, _) in child_grooming_info:
                 if "Y" in answer:
                     signals.append(indicator)
 
@@ -372,7 +435,7 @@ class ModBot(discord.Client):
         report.reported_message = self.messages[-1][2]
         report.abuse_type = broad_abuse
         report.specific_abuse_type = abuse_type
-
+        
         report.child_grooming_info = signals
         report.danger_indicated = "Y" in third_answer
 
@@ -380,14 +443,16 @@ class ModBot(discord.Client):
         report.specific_abuse_type = abuse_type
         report.state = State.REPORT_COMPLETE
 
-        self.pending_moderation.put(
-            (report.calculate_report_severity() * - 1, report))
+        self.pending_moderation.put((report.calculate_report_severity() * - 1, report))
+
 
         response = f"There's a new report from the MOD_BOT!\n"
         response += f"There are {self.pending_moderation.qsize()} report(s) in the queue.\n\n"
         response += "Type \"show reports\" to see them or \"moderate\" to start moderating. \n\n\n"
 
         return response
+
+
 
     def code_format(self, text):
         return text
