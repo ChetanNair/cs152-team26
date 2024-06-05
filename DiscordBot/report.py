@@ -4,6 +4,9 @@ import re
 from discord.components import SelectOption
 from discord.ui import Select, View
 from discord.ext import commands
+from perspective import get_perspective_scores
+
+PERSPECTIVE_SCORE_THRESHOLD = 0
 
 
 class State(Enum):
@@ -86,6 +89,7 @@ class Report:
     HELP_KEYWORD = "help"
 
     def __init__(self, client, author):
+        self.report_id = None
         self.state = State.REPORT_START
         self.author = author
         self.guild_id = None
@@ -134,6 +138,13 @@ class Report:
             except discord.errors.NotFound:
                 return ["It seems this message was deleted or never existed. Please try again or say `cancel` to cancel."]
 
+            perspective_scores = get_perspective_scores(message.content)
+            score_list = list(perspective_scores.values())
+            perspective_violation = True in [
+                ele > PERSPECTIVE_SCORE_THRESHOLD for ele in score_list]
+
+            if perspective_violation:
+                self.report_severity_multiplier *= 1 + max(score_list)
             # Here we've found the message - it's up to you to decide what to do next!
             self.state = State.AWAITING_ABUSE_TYPE
             self.reported_message = message
@@ -509,7 +520,7 @@ class Report:
         return compiled
 
     def report_complete(self):
-        return self.state == State.REPORT_COMPLETE
+        return self.state == State.REPORT_COMPLETE or self.state == State.CANCELED
 
     def report_canceled(self):
         return self.state == State.CANCELED
