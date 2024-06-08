@@ -6,7 +6,7 @@ from discord.ui import Select, View
 from discord.ext import commands
 from perspective import get_perspective_scores
 
-PERSPECTIVE_SCORE_THRESHOLD = 0
+PERSPECTIVE_SCORE_THRESHOLD = 0.5
 
 
 class State(Enum):
@@ -228,6 +228,7 @@ class Report:
             elif self.abuse_type == BroadAbuseType.HARASSMENT:
                 await interaction.response.send_message(f"Please select the type of harassment you've experienced: ", view=self.generate_harassment_type_menu())
             else:
+                self.specific_abuse_type = BroadAbuseType.OTHER
                 self.state = State.IMMINENT_DANGER
                 await interaction.response.send_message(f"Is there an immediate risk to someone's safety? (Yes/No)")
 
@@ -492,11 +493,12 @@ class Report:
         return view
 
     def calculate_report_severity(self):
-        return severities[self.specific_abuse_type] * self.report_severity_multiplier + len(self.child_grooming_info)
+        return round(float(severities[self.specific_abuse_type] * self.report_severity_multiplier + len(self.child_grooming_info)), 2)
 
     def compile_report_to_moderate(self, num_offenses):
         compiled = f"The following message was reported: \n\n"
-        compiled += f"```{self.reported_message.author.name}: {self.reported_message.content}```\n"
+        reported_content = self.reported_message.content[:1000] + ('...' if len(self.reported_message.content) > 1000 else '')
+        compiled += f"```{self.reported_message.author.name}: {reported_content}```\n"
         compiled += f"Abuse type: {self.abuse_type}\n"
         compiled += f"Specific Abuse Type: {self.specific_abuse_type}\n"
         compiled += f"Severity: {self.calculate_report_severity()}\n\n"
@@ -518,6 +520,7 @@ class Report:
 
         compiled += "\n\n\n"
         return compiled
+
 
     def report_complete(self):
         return self.state == State.REPORT_COMPLETE or self.state == State.CANCELED
